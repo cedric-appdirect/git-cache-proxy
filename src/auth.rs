@@ -37,6 +37,7 @@ use tokio::time::Instant;
 
 use crate::config::{AuthProvider, RepoForm};
 use crate::lfs::DownloadGrant;
+use crate::metrics::{Metrics, ValidationResult};
 use crate::repo;
 
 /// Distinct `(credential, repo)` verdicts kept for `--auth-ttl-seconds`; least
@@ -142,7 +143,7 @@ impl Auth {
 
     /// Resolve flags and profiles into an `Auth`, failing on any conflicting
     /// combination so misconfiguration surfaces at startup, not on first request.
-    pub fn build(cfg: AuthConfig) -> Result<Self> {
+    pub fn build(cfg: AuthConfig, metrics: Arc<Metrics>) -> Result<Self> {
         if cfg.timeout.is_zero() {
             bail!("--auth-timeout-seconds must be greater than zero");
         }
@@ -189,7 +190,7 @@ impl Auth {
                         BearerUser::Gitlab
                     },
                 };
-                provider_mode(&cfg, check, signing_key.as_deref())?
+                provider_mode(&cfg, check, signing_key.as_deref(), metrics)?
             }
             AuthProvider::Custom => {
                 forbid(&serve_token, "--serve-token", provider)?;
@@ -220,7 +221,7 @@ impl Auth {
                     header_value,
                     repo_form: cfg.repo_form.unwrap_or(RepoForm::Path),
                 };
-                provider_mode(&cfg, check, signing_key.as_deref())?
+                provider_mode(&cfg, check, signing_key.as_deref(), metrics)?
             }
         };
         Ok(Self { mode })
@@ -319,6 +320,7 @@ struct Provider {
     /// Concurrent checks of one `(credential, repo)` share a single call.
     inflight: Mutex<HashMap<CacheKey, Arc<OnceCell<Verdict>>>>,
     grants: grant::Signer,
+    metrics: Arc<Metrics>,
 }
 
 /// Where a client credential is checked.
@@ -379,6 +381,7 @@ impl Provider {
             repo: repo.to_string(),
         };
         if let Some(v) = self.cached(&key) {
+            self.metrics.record_auth_cache_hit();
             return v;
         }
         let inflight = self.join(&key);
@@ -444,11 +447,18 @@ impl Provider {
                 Ok(Ok(permit)) => Some(permit),
                 _ => {
                     tracing::warn!(repo, "token validation saturated (--auth-max-concurrent)");
+                    self.metrics.record_validation(ValidationResult::Saturated);
                     return Verdict::Unavailable;
                 }
             },
             None => None,
         };
+        let verdict = self.call(req, repo).await;
+        self.metrics.record_validation(verdict.into());
+        verdict
+    }
+
+    async fn call(&self, req: reqwest::RequestBuilder, repo: &str) -> Verdict {
         let mut resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -618,7 +628,12 @@ fn parse_token_header(line: &str) -> Result<(HeaderName, String)> {
 
 /// Build the provider mode: the reqwest client is built once, at startup, so
 /// the per-request path stays infallible.
-fn provider_mode(cfg: &AuthConfig, check: Check, signing_key: Option<&str>) -> Result<Mode> {
+fn provider_mode(
+    cfg: &AuthConfig,
+    check: Check,
+    signing_key: Option<&str>,
+    metrics: Arc<Metrics>,
+) -> Result<Mode> {
     let grants = grant::Signer::new(signing_key)?;
     if signing_key.is_none() {
         tracing::warn!(
@@ -644,6 +659,7 @@ fn provider_mode(cfg: &AuthConfig, check: Check, signing_key: Option<&str>) -> R
         verdicts: Mutex::new(LruCache::new(VERDICT_CAPACITY)),
         inflight: Mutex::new(HashMap::new()),
         grants,
+        metrics,
     })))
 }
 
@@ -719,22 +735,22 @@ mod tests {
 
     #[test]
     fn legacy_and_explicit_shared_modes() {
-        let legacy = Auth::build(config(AuthProvider::None)).unwrap();
+        let legacy = build(config(AuthProvider::None)).unwrap();
         assert_eq!(legacy.describe(), "anonymous");
-        let legacy = Auth::build(AuthConfig {
+        let legacy = build(AuthConfig {
             serve_token: Some("s3cret".into()),
             ..config(AuthProvider::None)
         })
         .unwrap();
         assert_eq!(legacy.describe(), "shared token");
-        let explicit = Auth::build(AuthConfig {
+        let explicit = build(AuthConfig {
             serve_token: Some("s3cret".into()),
             ..config(AuthProvider::Shared)
         })
         .unwrap();
         assert_eq!(explicit.describe(), "shared token");
         // Blank collapses to absent, so it cannot enforce an empty secret.
-        let blank = Auth::build(AuthConfig {
+        let blank = build(AuthConfig {
             serve_token: Some("   ".into()),
             ..config(AuthProvider::Shared)
         })
@@ -747,14 +763,14 @@ mod tests {
         // A validate URL with the default `none` mode would otherwise serve
         // anonymously while looking configured.
         for provider in [AuthProvider::None, AuthProvider::Shared] {
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 serve_token: Some("s3cret".into()),
                 validate_url: Some("http://127.0.0.1:1/v/{repo}".into()),
                 ..config(provider)
             })
             .unwrap_err();
             assert!(err.to_string().contains("--auth-validate-url"));
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 serve_token: Some("s3cret".into()),
                 signing_key: Some(KEY.into()),
                 ..config(provider)
@@ -771,7 +787,7 @@ mod tests {
             AuthProvider::Gitlab,
             AuthProvider::Custom,
         ] {
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 serve_token: Some("s3cret".into()),
                 ..provider_config(provider)
             })
@@ -782,14 +798,14 @@ mod tests {
 
     #[test]
     fn custom_requires_a_repo_template() {
-        let err = Auth::build(AuthConfig {
+        let err = build(AuthConfig {
             validate_url: Some("http://127.0.0.1:1/validate".into()),
             ..provider_config(AuthProvider::Custom)
         })
         .unwrap_err();
         assert!(err.to_string().contains("{repo}"));
 
-        let no_url = Auth::build(AuthConfig {
+        let no_url = build(AuthConfig {
             validate_url: None,
             ..provider_config(AuthProvider::Custom)
         })
@@ -797,7 +813,7 @@ mod tests {
         assert!(no_url.to_string().contains("--auth-validate-url"));
 
         // The token must never ride in the URL: transport errors echo it.
-        let leaked = Auth::build(AuthConfig {
+        let leaked = build(AuthConfig {
             validate_url: Some("http://127.0.0.1:1/validate/{repo}?t={token}".into()),
             ..provider_config(AuthProvider::Custom)
         })
@@ -805,7 +821,7 @@ mod tests {
         assert!(leaked.to_string().contains("--auth-token-header"));
 
         // A header without `{token}` would send nothing, validating everyone.
-        let headerless = Auth::build(AuthConfig {
+        let headerless = build(AuthConfig {
             token_header: Some("Authorization: Bearer".into()),
             ..provider_config(AuthProvider::Custom)
         })
@@ -816,21 +832,21 @@ mod tests {
     #[test]
     fn custom_only_flags_are_rejected_for_profiles() {
         for provider in [AuthProvider::Github, AuthProvider::Gitlab] {
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 validate_url: Some("http://127.0.0.1:1/v/{repo}".into()),
                 ..provider_config(provider)
             })
             .unwrap_err();
             assert!(err.to_string().contains("--auth-validate-url"));
 
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 token_header: Some("Authorization: Bearer {token}".into()),
                 ..provider_config(provider)
             })
             .unwrap_err();
             assert!(err.to_string().contains("--auth-token-header"));
 
-            let err = Auth::build(AuthConfig {
+            let err = build(AuthConfig {
                 repo_form: Some(RepoForm::Percent),
                 ..provider_config(provider)
             })
@@ -852,7 +868,7 @@ mod tests {
             }
             Check::Endpoint { .. } => panic!("gitlab probes upstream"),
         }
-        let err = Auth::build(AuthConfig {
+        let err = build(AuthConfig {
             upstream_base: "file:///srv/git".into(),
             ..provider_config(AuthProvider::Github)
         })
@@ -875,15 +891,15 @@ mod tests {
             },
         ];
         for case in cases {
-            let err = Auth::build(case(false)).unwrap_err();
+            let err = build(case(false)).unwrap_err();
             assert!(err.to_string().contains("--auth-allow-http"), "{err}");
-            assert!(Auth::build(case(true)).is_ok());
+            assert!(build(case(true)).is_ok());
         }
     }
 
     #[test]
     fn timeout_must_be_positive() {
-        let err = Auth::build(AuthConfig {
+        let err = build(AuthConfig {
             timeout: Duration::from_secs(0),
             ..provider_config(AuthProvider::Custom)
         })
@@ -1065,6 +1081,11 @@ mod tests {
         // Waited out the timeout for a slot, rather than failing on the
         // unreachable endpoint.
         assert_eq!(start.elapsed(), p.timeout);
+        assert!(
+            p.metrics
+                .gather()
+                .contains(r#"gitcacheproxy_auth_validations_total{result="saturated"} 1"#)
+        );
     }
 
     #[test]
@@ -1094,7 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn lfs_objects_need_a_grant_for_exactly_that_object() {
-        let auth = Auth::build(provider_config(AuthProvider::Github)).unwrap();
+        let auth = build(provider_config(AuthProvider::Github)).unwrap();
         let grant = auth.lfs_grant("r.git", "oid", 7).unwrap();
         let h = headers(&grant.authorization);
         let object = |repo, size| Target::LfsObject {
@@ -1125,7 +1146,7 @@ mod tests {
         let shared = Auth::shared("s3cret").lfs_grant("r", "oid", 1).unwrap();
         assert_eq!(shared.authorization, "Bearer s3cret");
         assert_eq!(shared.expires_in, None);
-        let auth = Auth::build(provider_config(AuthProvider::Custom)).unwrap();
+        let auth = build(provider_config(AuthProvider::Custom)).unwrap();
         let grant = auth.lfs_grant("r", "oid", 1).unwrap();
         assert!(grant.authorization.starts_with("Bearer gcp1."));
         assert_eq!(grant.expires_in, Some(grant::LIFETIME));
@@ -1160,8 +1181,12 @@ mod tests {
         }
     }
 
+    fn build(cfg: AuthConfig) -> Result<Auth> {
+        Auth::build(cfg, Arc::new(Metrics::new()))
+    }
+
     fn provider(cfg: AuthConfig) -> Box<Provider> {
-        match Auth::build(cfg).unwrap().mode {
+        match build(cfg).unwrap().mode {
             Mode::Provider(p) => p,
             _ => panic!("not the provider mode"),
         }
