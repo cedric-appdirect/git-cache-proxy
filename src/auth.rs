@@ -280,6 +280,28 @@ impl Auth {
         }
     }
 
+    /// The client's own credential as `github`/`gitlab` forward it upstream: the
+    /// `Authorization` header value a git host accepts for that scheme (Basic
+    /// verbatim, Bearer as Basic with the host's documented username).
+    ///
+    /// Sensitive. `None` outside `github`/`gitlab` - anonymous and shared mode
+    /// never had a client credential to forward, and `custom` sends it to its own
+    /// validation endpoint instead - and also when the request carries none.
+    ///
+    /// This is a pure reshape: it makes no request, reads no verdict, and decides
+    /// nothing. Only a credential `check` already allowed should be forwarded, and
+    /// it is distinct from the proxy's own `--upstream-auth-header`.
+    #[must_use]
+    pub fn forwarded_credential(&self, headers: &HeaderMap) -> Option<HeaderValue> {
+        let Mode::Provider(provider) = &self.mode else {
+            return None;
+        };
+        let Check::Upstream { bearer_user, .. } = &provider.check else {
+            return None;
+        };
+        credential(headers)?.forwarded(*bearer_user)
+    }
+
     /// A short label for startup logging.
     pub fn describe(&self) -> &'static str {
         match &self.mode {
@@ -366,6 +388,31 @@ enum Scheme {
     Bearer,
 }
 
+impl Credential<'_> {
+    /// This credential in the `Authorization` form a git host takes for its
+    /// scheme: Basic verbatim, Bearer re-encoded as Basic with the username that
+    /// host documents, since a bare token is never sent as a Bearer token to a
+    /// git endpoint.
+    ///
+    /// Sensitive on the way out, so no caller can forward a token in the clear.
+    /// The `None` arm cannot be reached - base64 output is always a valid header
+    /// value - and is kept so a value that somehow is not fails closed instead of
+    /// panicking on a request path.
+    fn forwarded(&self, bearer_user: BearerUser) -> Option<HeaderValue> {
+        let value = match self.scheme {
+            // The username can matter (GitLab job tokens need
+            // `gitlab-ci-token`), so Basic is not re-split and reassembled.
+            Scheme::Basic => self.raw.clone(),
+            Scheme::Bearer => HeaderValue::from_str(&format!(
+                "Basic {}",
+                STANDARD.encode(format!("{}:{}", bearer_user.as_str(), self.token))
+            ))
+            .ok()?,
+        };
+        Some(sensitive(value))
+    }
+}
+
 impl Provider {
     async fn check(&self, headers: &HeaderMap, repo: &str) -> Verdict {
         let Some(cred) = credential(headers) else {
@@ -405,21 +452,12 @@ impl Provider {
     fn request(&self, cred: &Credential<'_>, repo: &str) -> Option<reqwest::RequestBuilder> {
         match &self.check {
             Check::Upstream { base, bearer_user } => {
-                // Basic goes upstream verbatim: the username can matter (GitLab
-                // job tokens need `gitlab-ci-token`).
-                let auth = match cred.scheme {
-                    Scheme::Basic => cred.raw.clone(),
-                    Scheme::Bearer => HeaderValue::from_str(&format!(
-                        "Basic {}",
-                        STANDARD.encode(format!("{}:{}", bearer_user.as_str(), cred.token))
-                    ))
-                    .ok()?,
-                };
+                let auth = cred.forwarded(*bearer_user)?;
                 let url = format!("{base}/{repo}/info/refs?service=git-upload-pack");
                 Some(
                     self.client
                         .get(url)
-                        .header(header::AUTHORIZATION, sensitive(auth))
+                        .header(header::AUTHORIZATION, auth)
                         .header("git-protocol", "version=2"),
                 )
             }
@@ -1000,6 +1038,83 @@ mod tests {
     }
 
     #[test]
+    fn a_bearer_token_is_forwarded_as_basic_with_the_hosts_username() {
+        let github = build(provider_config(AuthProvider::Github)).unwrap();
+        let forwarded = github.forwarded_credential(&headers("Bearer tok")).unwrap();
+        assert_eq!(
+            forwarded,
+            format!("Basic {}", STANDARD.encode(b"x-access-token:tok"))
+        );
+        let gitlab = build(provider_config(AuthProvider::Gitlab)).unwrap();
+        let forwarded = gitlab.forwarded_credential(&headers("Bearer tok")).unwrap();
+        assert_eq!(
+            forwarded,
+            format!("Basic {}", STANDARD.encode(b"oauth2:tok"))
+        );
+        // The token must not reach a log line or a debug print.
+        assert!(
+            github
+                .forwarded_credential(&headers("Bearer tok"))
+                .unwrap()
+                .is_sensitive()
+        );
+    }
+
+    #[test]
+    fn basic_is_forwarded_verbatim_whatever_its_username() {
+        let auth = build(provider_config(AuthProvider::Gitlab)).unwrap();
+        // GitLab job tokens only authenticate with their own username, so
+        // forwarding must not substitute the Bearer username.
+        let basic = format!("Basic {}", STANDARD.encode(b"gitlab-ci-token:job-token"));
+        let forwarded = auth.forwarded_credential(&headers(&basic)).unwrap();
+        assert_eq!(forwarded, basic);
+        assert!(forwarded.is_sensitive());
+    }
+
+    #[test]
+    fn only_provider_upstream_mode_has_a_credential_to_forward() {
+        let h = headers("Bearer tok");
+        // Nothing to forward: no mode, or a mode whose credential is the proxy's
+        // own. `custom` keeps the token for its own validation header.
+        for auth in [
+            Auth::anonymous(),
+            Auth::shared("s3cret"),
+            build(provider_config(AuthProvider::Custom)).unwrap(),
+        ] {
+            assert_eq!(auth.forwarded_credential(&h), None, "{}", auth.describe());
+        }
+        // Provider mode, but no usable credential on the request.
+        let github = build(provider_config(AuthProvider::Github)).unwrap();
+        assert_eq!(github.forwarded_credential(&HeaderMap::new()), None);
+        assert_eq!(github.forwarded_credential(&headers("Bearer ")), None);
+        assert_eq!(github.forwarded_credential(&headers("Digest xyz")), None);
+    }
+
+    #[test]
+    fn the_probe_sends_the_credential_the_public_function_returns() {
+        // What proves read access in `check` must be what a fetch would forward,
+        // or a caller cannot rely on either.
+        for provider in [AuthProvider::Github, AuthProvider::Gitlab] {
+            let auth = build(provider_config(provider)).unwrap();
+            let basic = format!("Basic {}", STANDARD.encode(b"x-access-token:tok"));
+            for presented in ["Bearer tok", basic.as_str()] {
+                let h = headers(presented);
+                let expected = auth.forwarded_credential(&h).unwrap();
+                let req = provider_of(&auth)
+                    .request(&credential(&h).unwrap(), "r.git")
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                assert_eq!(req.headers()[header::AUTHORIZATION], expected.as_bytes());
+                assert_eq!(
+                    req.url().as_str(),
+                    "https://upstream.invalid/r.git/info/refs?service=git-upload-pack"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn classification_maps_statuses_to_verdicts() {
         assert_eq!(classify(200, false), Verdict::Allow);
         assert_eq!(classify(204, false), Verdict::Allow);
@@ -1187,6 +1302,13 @@ mod tests {
 
     fn provider(cfg: AuthConfig) -> Box<Provider> {
         match build(cfg).unwrap().mode {
+            Mode::Provider(p) => p,
+            _ => panic!("not the provider mode"),
+        }
+    }
+
+    fn provider_of(auth: &Auth) -> &Provider {
+        match &auth.mode {
             Mode::Provider(p) => p,
             _ => panic!("not the provider mode"),
         }
