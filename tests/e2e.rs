@@ -25,7 +25,7 @@ use git_cache_proxy::server::{AppState, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt; // for `oneshot`
 
-mod support;
+mod helpers;
 
 /// Regression test for the gzip transport bug: git's smart-HTTP client
 /// compresses the `git-upload-pack` request body and sends `Content-Encoding:
@@ -1012,10 +1012,10 @@ async fn clone_with_per_request_token_auth() {
     );
 
     // Serving clones the real `file://` upstream; only the probe goes here.
-    let (validator, _hits) = support::spawn_validator(support::Reply::Password("good-token")).await;
+    let (validator, _hits) = helpers::spawn_validator(helpers::Reply::Password("good-token")).await;
     let auth = Arc::new(
         Auth::build(
-            support::github_auth_config(&validator, 0),
+            helpers::github_auth_config(&validator, 0),
             Arc::new(Metrics::new()),
         )
         .unwrap(),

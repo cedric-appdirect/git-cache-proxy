@@ -24,7 +24,7 @@ use git_cache_proxy::server::{AppState, router};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt; // for `oneshot`
 
-mod support;
+mod helpers;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batch_rewrites_download_href_to_the_proxy() {
@@ -68,7 +68,7 @@ async fn batch_rewrites_download_href_to_the_proxy() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_batch_grants_serve_objects_without_revalidating() {
     let (addr, _batches) = spawn_upstream(Mode::Ok).await;
-    let (validator, validations) = support::spawn_validator(support::Reply::Ok).await;
+    let (validator, validations) = helpers::spawn_validator(helpers::Reply::Ok).await;
     let cache = tempfile::tempdir().unwrap();
     let mut state = proxy_state(addr, cache.path(), Arc::new(Metrics::new()));
     state.auth = provider_auth(&validator);
@@ -103,7 +103,7 @@ async fn provider_batch_grants_serve_objects_without_revalidating() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grant_does_not_open_another_repos_cached_object() {
     let (addr, _batches) = spawn_upstream(Mode::Ok).await;
-    let (validator, _validations) = support::spawn_validator(support::Reply::Ok).await;
+    let (validator, _validations) = helpers::spawn_validator(helpers::Reply::Ok).await;
     let cache = tempfile::tempdir().unwrap();
     let mut state = proxy_state(addr, cache.path(), Arc::new(Metrics::new()));
     state.auth = provider_auth(&validator);
@@ -123,7 +123,7 @@ async fn a_grant_does_not_open_another_repos_cached_object() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_grant_from_one_replica_is_honored_by_another() {
     let (addr, _batches) = spawn_upstream(Mode::Ok).await;
-    let (validator, _validations) = support::spawn_validator(support::Reply::Ok).await;
+    let (validator, _validations) = helpers::spawn_validator(helpers::Reply::Ok).await;
     let (cache_a, cache_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut a = proxy_state(addr, cache_a.path(), Arc::new(Metrics::new()));
     a.auth = provider_auth(&validator);
@@ -461,7 +461,7 @@ async fn body_bytes(resp: Response) -> Vec<u8> {
 fn provider_auth(validator: &str) -> Arc<Auth> {
     Arc::new(
         Auth::build(
-            support::github_auth_config(validator, 0),
+            helpers::github_auth_config(validator, 0),
             Arc::new(Metrics::new()),
         )
         .unwrap(),

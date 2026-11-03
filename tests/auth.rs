@@ -21,9 +21,9 @@ use git_cache_proxy::metrics::Metrics;
 use git_cache_proxy::server::{AppState, router};
 use tower::ServiceExt; // for `oneshot`
 
-mod support;
+mod helpers;
 
-use support::{Reply, github_auth_config, spawn_validator, spawn_validator_with};
+use helpers::{Reply, github_auth_config, spawn_validator, spawn_validator_with};
 
 const REFS: &str = "/repo.git/info/refs?service=git-upload-pack";
 

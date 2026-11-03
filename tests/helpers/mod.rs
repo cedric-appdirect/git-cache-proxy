@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared helpers for the suites that exercise per-request token validation:
 //! a mock upstream `info/refs` on a live local socket, and the `github` auth
-//! config that probes it. Each suite pulls it in with `mod support;`, so
-//! Cargo does not build it as a test target of its own.
+//! config that probes it. Each suite pulls it in with `mod helpers;`, so
+//! Cargo does not build it as a test target of its own. A `mod.rs` rather than
+//! a bare `tests/helpers.rs` keeps it out of auto-discovery, which would
+//! otherwise compile it as a separate zero-test binary.
 
 use std::sync::Arc;
 use std::time::Duration;
