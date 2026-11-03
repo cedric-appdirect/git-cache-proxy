@@ -62,6 +62,19 @@ pub enum Verdict {
     Unavailable,
 }
 
+/// The auth verdict of a completed validation call, as its metric label.
+/// `Saturated` has no verdict: a call that never ran is recorded where it is
+/// refused. Lives here so `metrics` needs no back-reference to `auth`.
+impl From<Verdict> for ValidationResult {
+    fn from(verdict: Verdict) -> Self {
+        match verdict {
+            Verdict::Allow => Self::Allow,
+            Verdict::Deny => Self::Deny,
+            Verdict::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
 /// What a request asks for, as classified by the router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target<'a> {

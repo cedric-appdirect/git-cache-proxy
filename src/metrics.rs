@@ -16,7 +16,6 @@ use prometheus::{
     TextEncoder,
 };
 
-use crate::auth::Verdict;
 use crate::git::CacheOutcome;
 
 /// Histogram buckets, in seconds, for git operation latency: from a fast cached
@@ -142,19 +141,6 @@ impl ValidationResult {
             Self::Deny => "deny",
             Self::Unavailable => "unavailable",
             Self::Saturated => "saturated",
-        }
-    }
-}
-
-/// The auth verdict of a completed validation call, as its metric label.
-/// `Saturated` has no verdict: a call that never ran is recorded where it is
-/// refused.
-impl From<Verdict> for ValidationResult {
-    fn from(verdict: Verdict) -> Self {
-        match verdict {
-            Verdict::Allow => Self::Allow,
-            Verdict::Deny => Self::Deny,
-            Verdict::Unavailable => Self::Unavailable,
         }
     }
 }
