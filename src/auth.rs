@@ -168,6 +168,14 @@ impl Auth {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         };
+        // Set-but-blank is the one shape that silently changes the auth mode, so
+        // it gets a warning; an absent flag is the documented anonymous default.
+        if cfg.serve_token.is_some() && trim(&cfg.serve_token).is_none() {
+            tracing::warn!(
+                "--serve-token is blank; serving anonymously - \
+                 set a token, or unset the flag, to silence this"
+            );
+        }
         let serve_token = trim(&cfg.serve_token);
         let validate_url = trim(&cfg.validate_url);
         let token_header = trim(&cfg.token_header);
@@ -493,8 +501,11 @@ impl Provider {
     }
 
     async fn send(&self, req: reqwest::RequestBuilder, repo: &str) -> Verdict {
+        // One deadline for the whole validation, so the slot wait and the HTTP
+        // call share the configured budget instead of each getting a fresh one.
+        let deadline = Instant::now() + self.timeout;
         let _permit = match &self.permits {
-            Some(permits) => match tokio::time::timeout(self.timeout, permits.acquire()).await {
+            Some(permits) => match tokio::time::timeout_at(deadline, permits.acquire()).await {
                 Ok(Ok(permit)) => Some(permit),
                 _ => {
                     tracing::warn!(repo, "token validation saturated (--auth-max-concurrent)");
@@ -504,13 +515,20 @@ impl Provider {
             },
             None => None,
         };
-        let verdict = self.call(req, repo).await;
+        let verdict = self.call(req, repo, deadline).await;
         self.metrics.record_validation(verdict.into());
         verdict
     }
 
-    async fn call(&self, req: reqwest::RequestBuilder, repo: &str) -> Verdict {
-        let mut resp = match req.send().await {
+    async fn call(&self, req: reqwest::RequestBuilder, repo: &str, deadline: Instant) -> Verdict {
+        // Whatever the slot wait left of the budget. Zero would mean `no timeout`
+        // to reqwest, so it is short-circuited as a failure instead.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(repo, "token validation ran out of time waiting for a slot");
+            return Verdict::Unavailable;
+        }
+        let mut resp = match req.timeout(remaining).send().await {
             Ok(r) => r,
             Err(e) => {
                 // Without the URL: a custom endpoint's may carry userinfo, and
