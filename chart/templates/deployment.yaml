@@ -104,9 +104,9 @@ spec:
             - name: GITCACHEPROXY_AUTH_TOKEN_HEADER
               value: {{ .tokenHeader | quote }}
             {{- end }}
-            {{- if .repoForm }}
-            - name: GITCACHEPROXY_AUTH_REPO_FORM
-              value: {{ .repoForm | quote }}
+            {{- if .repoEncoding }}
+            - name: GITCACHEPROXY_AUTH_REPO_ENCODING
+              value: {{ .repoEncoding | quote }}
             {{- end }}
             {{- if .timeoutSeconds }}
             - name: GITCACHEPROXY_AUTH_TIMEOUT_SECONDS

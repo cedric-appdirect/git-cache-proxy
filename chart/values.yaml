@@ -52,7 +52,7 @@ clientAuth:
   tokenHeader: ""
   # custom only: repo encoding for {repo} - `path` (owner/repo) or `percent`
   # (owner%2Frepo, GitLab-style). Empty = path.
-  repoForm: ""
+  repoEncoding: ""
   # Total budget for one validation request. Empty = the binary default (10).
   timeoutSeconds: ""
   # Reuse a verdict per (credential, repo) for this many seconds. Empty = 0

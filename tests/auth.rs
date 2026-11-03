@@ -14,7 +14,7 @@ use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use git_cache_proxy::auth::{Auth, AuthConfig};
-use git_cache_proxy::config::{AuthProvider, RepoForm};
+use git_cache_proxy::config::{AuthProvider, RepoEncoding};
 use git_cache_proxy::git::{GitCache, GitConfig};
 use git_cache_proxy::lfs::{Lfs, LfsConfig};
 use git_cache_proxy::metrics::Metrics;
@@ -300,10 +300,10 @@ async fn unrepresentable_tokens_are_denied_without_a_call() {
 }
 
 #[tokio::test]
-async fn custom_repo_forms_reach_the_endpoint() {
+async fn custom_repo_encodings_reach_the_endpoint() {
     let (base, hits) = spawn_validator(Reply::Ok).await;
     let resp = get(
-        state(custom(&base, Some(RepoForm::Percent))),
+        state(custom(&base, Some(RepoEncoding::Percent))),
         "/g/p.git/info/refs?service=git-upload-pack",
         Some("Bearer good-token"),
     )
@@ -319,13 +319,13 @@ fn build(base: &str, ttl: u64) -> Arc<Auth> {
 }
 
 /// `custom` validating against the mock's `/validate/{repo}`.
-fn custom(base: &str, repo_form: Option<RepoForm>) -> Arc<Auth> {
+fn custom(base: &str, repo_encoding: Option<RepoEncoding>) -> Arc<Auth> {
     Arc::new(
         Auth::build(
             AuthConfig {
                 provider: AuthProvider::Custom,
                 validate_url: Some(format!("{base}/validate/{{repo}}")),
-                repo_form,
+                repo_encoding,
                 upstream_base: "https://upstream.invalid".into(),
                 ..github_auth_config(base, 0)
             },

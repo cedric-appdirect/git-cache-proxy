@@ -47,7 +47,7 @@ impl fmt::Display for AuthProvider {
 /// Provider modes only admit names of RFC 3986 unreserved characters and `/`,
 /// so no other byte ever needs encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum RepoForm {
+pub enum RepoEncoding {
     /// `owner/repo`: strip a `.git` suffix (REST-style: one path component per
     /// segment).
     Path,
@@ -117,7 +117,7 @@ pub struct Config {
     pub auth_signing_key: Option<String>,
 
     /// `custom` only: URL template of the validation endpoint, with `{repo}`
-    /// interpolated (already encoded per `--auth-repo-form`). The token must go
+    /// interpolated (already encoded per `--auth-repo-encoding`). The token must go
     /// in `--auth-token-header`, not this URL.
     #[arg(long, env = "GITCACHEPROXY_AUTH_VALIDATE_URL")]
     pub auth_validate_url: Option<String>,
@@ -130,8 +130,8 @@ pub struct Config {
 
     /// `custom` only: how the repo name is encoded into `--auth-validate-url`'s
     /// `{repo}` placeholder.
-    #[arg(long, env = "GITCACHEPROXY_AUTH_REPO_FORM", value_enum)]
-    pub auth_repo_form: Option<RepoForm>,
+    #[arg(long, env = "GITCACHEPROXY_AUTH_REPO_ENCODING", value_enum)]
+    pub auth_repo_encoding: Option<RepoEncoding>,
 
     /// Total budget for one token-validation request. A hung API must not pin
     /// a clone request on its own.

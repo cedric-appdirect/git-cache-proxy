@@ -35,7 +35,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{OnceCell, Semaphore};
 use tokio::time::Instant;
 
-use crate::config::{AuthProvider, RepoForm};
+use crate::config::{AuthProvider, RepoEncoding};
 use crate::lfs::DownloadGrant;
 use crate::metrics::{Metrics, ValidationResult};
 use crate::repo;
@@ -88,7 +88,7 @@ pub struct AuthConfig {
     /// `custom` only: header line template containing `{token}`.
     pub token_header: Option<String>,
     /// `custom` only: repo encoding. `None` means `path`.
-    pub repo_form: Option<RepoForm>,
+    pub repo_encoding: Option<RepoEncoding>,
     /// Provider modes: HMAC key of LFS download grants, shared by every replica.
     /// `None` generates a per-process key.
     pub signing_key: Option<String>,
@@ -163,7 +163,7 @@ impl Auth {
         let forbid_custom_flags = || -> Result<()> {
             forbid(&validate_url, "--auth-validate-url", provider)?;
             forbid(&token_header, "--auth-token-header", provider)?;
-            forbid(&cfg.repo_form, "--auth-repo-form", provider)
+            forbid(&cfg.repo_encoding, "--auth-repo-encoding", provider)
         };
 
         let mode = match provider {
@@ -219,7 +219,7 @@ impl Auth {
                     url,
                     header_name,
                     header_value,
-                    repo_form: cfg.repo_form.unwrap_or(RepoForm::Path),
+                    repo_encoding: cfg.repo_encoding.unwrap_or(RepoEncoding::Path),
                 };
                 provider_mode(&cfg, check, signing_key.as_deref(), metrics)?
             }
@@ -361,7 +361,7 @@ enum Check {
         header_name: HeaderName,
         /// Header value template containing `{token}`.
         header_value: String,
-        repo_form: RepoForm,
+        repo_encoding: RepoEncoding,
     },
 }
 
@@ -465,11 +465,11 @@ impl Provider {
                 url,
                 header_name,
                 header_value,
-                repo_form,
+                repo_encoding,
             } => {
                 let value =
                     HeaderValue::from_str(&header_value.replace("{token}", &cred.token)).ok()?;
-                let url = url.replace("{repo}", &repo_name(repo, *repo_form));
+                let url = url.replace("{repo}", &repo_name(repo, *repo_encoding));
                 Some(
                     self.client
                         .get(url)
@@ -702,12 +702,12 @@ fn provider_mode(
 }
 
 /// The repo name for a custom endpoint's `{repo}`: `.git` stripped, then
-/// encoded per the configured form. `url_safe` names need nothing else.
-fn repo_name(repo: &str, form: RepoForm) -> String {
+/// encoded per the configured encoding. `url_safe` names need nothing else.
+fn repo_name(repo: &str, encoding: RepoEncoding) -> String {
     let name = repo.strip_suffix(".git").unwrap_or(repo);
-    match form {
-        RepoForm::Path => name.to_string(),
-        RepoForm::Percent => name.replace('/', "%2F"),
+    match encoding {
+        RepoEncoding::Path => name.to_string(),
+        RepoEncoding::Percent => name.replace('/', "%2F"),
     }
 }
 
@@ -885,11 +885,11 @@ mod tests {
             assert!(err.to_string().contains("--auth-token-header"));
 
             let err = build(AuthConfig {
-                repo_form: Some(RepoForm::Percent),
+                repo_encoding: Some(RepoEncoding::Percent),
                 ..provider_config(provider)
             })
             .unwrap_err();
-            assert!(err.to_string().contains("--auth-repo-form"));
+            assert!(err.to_string().contains("--auth-repo-encoding"));
         }
     }
 
@@ -957,14 +957,20 @@ mod tests {
 
     #[test]
     fn repo_names_are_encoded_per_form() {
-        assert_eq!(repo_name("owner/repo.git", RepoForm::Path), "owner/repo");
         assert_eq!(
-            repo_name("owner/repo.git", RepoForm::Percent),
+            repo_name("owner/repo.git", RepoEncoding::Path),
+            "owner/repo"
+        );
+        assert_eq!(
+            repo_name("owner/repo.git", RepoEncoding::Percent),
             "owner%2Frepo"
         );
-        assert_eq!(repo_name("g/team/p.git", RepoForm::Percent), "g%2Fteam%2Fp");
-        assert_eq!(repo_name("foo.bar.git", RepoForm::Path), "foo.bar");
-        assert_eq!(repo_name("proj", RepoForm::Path), "proj");
+        assert_eq!(
+            repo_name("g/team/p.git", RepoEncoding::Percent),
+            "g%2Fteam%2Fp"
+        );
+        assert_eq!(repo_name("foo.bar.git", RepoEncoding::Path), "foo.bar");
+        assert_eq!(repo_name("proj", RepoEncoding::Path), "proj");
     }
 
     #[test]
@@ -1275,7 +1281,7 @@ mod tests {
             serve_token: None,
             validate_url: None,
             token_header: None,
-            repo_form: None,
+            repo_encoding: None,
             signing_key: None,
             timeout: Duration::from_secs(10),
             ttl: Duration::from_secs(0),

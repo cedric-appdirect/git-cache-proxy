@@ -105,7 +105,7 @@ pointing at the Service.
 | `clientAuth.provider` | `""` | `github`, `gitlab`, or `custom` |
 | `clientAuth.validateUrl` | `""` | `custom`: URL template with `{repo}` |
 | `clientAuth.tokenHeader` | `""` | `custom`: header line template, e.g. `PRIVATE-TOKEN: {token}`; empty = `Authorization: Bearer {token}` |
-| `clientAuth.repoForm` | `""` | `custom`: repo encoding, `path` or `percent`; empty = `path` |
+| `clientAuth.repoEncoding` | `""` | `custom`: repo encoding, `path` or `percent`; empty = `path` |
 | `clientAuth.timeoutSeconds` | `""` | Budget per validation request; empty = `10` |
 | `clientAuth.ttlSeconds` | `""` | Verdict reuse window per (token, repo); empty = `0` (always revalidate) |
 | `clientAuth.maxConcurrent` | `""` | Validation requests in flight at once; empty = `32`, `0` = unlimited |

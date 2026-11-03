@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             serve_token: cfg.serve_token,
             validate_url: cfg.auth_validate_url,
             token_header: cfg.auth_token_header,
-            repo_form: cfg.auth_repo_form,
+            repo_encoding: cfg.auth_repo_encoding,
             signing_key: cfg.auth_signing_key,
             timeout: Duration::from_secs(cfg.auth_timeout_seconds),
             ttl: Duration::from_secs(cfg.auth_ttl_seconds),
